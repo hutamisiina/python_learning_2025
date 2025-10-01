@@ -11,6 +11,7 @@ class Node:
         self.node_id = node_id
         self.address = address
         self.links = []
+    # リンクを接続するメソッド追加予定
 
     def __str__(self):
         return f"ノード(ID: {self.node_id}, アドレス: {self.address})"
