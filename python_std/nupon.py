@@ -1,144 +1,238 @@
 import MetaTrader5 as mt5
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime
 import time
+import warnings
 
-class FreshAlgoTrader:
-    def __init__(self, symbol, timeframe, lot_size=0.01):
+# FutureWarningを抑制
+warnings.filterwarnings('ignore', category=FutureWarning)
+
+class FreshAlgoTrader_Exact:
+    def __init__(self, symbol, timeframe=mt5.TIMEFRAME_M15, lot_size=0.01):
         self.symbol = symbol
         self.timeframe = timeframe
         self.lot_size = lot_size
         self.magic_number = 234000
         
-        # パラメータ（Pineスクリプトから）
+        # 元のPineScriptのパラメータ
         self.sensitivity = 2.4
         self.st_tuner = 10
         self.ema150_period = 150
         self.ema250_period = 250
-        self.rsi_period = 50
-        self.rsi_smooth = 30
+        self.hma55_period = 55
         self.macd_fast = 12
         self.macd_slow = 26
         self.macd_signal = 9
+        self.dchannel_period = 30
+        
+        self.presets = "All Signals"
+        self.filter_style = "Trending Signals [Mode]"
         
         # リスク管理
-        self.use_perc_sl = False
-        self.perc_trailing_sl = 1.0
         self.mult_tp1 = 1.0
         self.mult_tp2 = 2.0
         self.mult_tp3 = 3.0
+        self.atr_multiplier = 2.2
+        
+        self.last_trade_time = 0
+        self.min_interval = 60
         
     def initialize_mt5(self):
-        """MT5に接続"""
+        """MT5接続"""
         if not mt5.initialize():
             print("MT5初期化失敗")
             return False
-        print(f"MT5接続成功: {mt5.version()}")
+        
+        account_info = mt5.account_info()
+        if account_info:
+            account_type = "デモ" if account_info.trade_mode == mt5.ACCOUNT_TRADE_MODE_DEMO else "リアル"
+            print(f"接続成功 - 口座: {account_info.login} ({account_type})")
+            print(f"残高: {account_info.balance} {account_info.currency}")
         return True
     
     def get_rates(self, count=500):
-        """過去のレートデータを取得"""
+        """データ取得"""
         rates = mt5.copy_rates_from_pos(self.symbol, self.timeframe, 0, count)
         if rates is None:
-            print("レートデータ取得失敗")
             return None
         df = pd.DataFrame(rates)
         df['time'] = pd.to_datetime(df['time'], unit='s')
         return df
     
-    def calculate_ema(self, data, period):
-        """EMAを計算"""
+    def ema(self, data, period):
+        """EMA計算"""
         return data.ewm(span=period, adjust=False).mean()
     
-    def calculate_supertrend(self, df, multiplier, period):
-        """スーパートレンド指標を計算"""
-        hl2 = (df['high'] + df['low']) / 2
+    def atr(self, df, period):
+        """ATR計算"""
+        high = df['high']
+        low = df['low']
+        close = df['close']
         
-        # ATRを計算
-        df['tr'] = np.maximum(
-            df['high'] - df['low'],
-            np.maximum(
-                abs(df['high'] - df['close'].shift(1)),
-                abs(df['low'] - df['close'].shift(1))
-            )
-        )
-        atr = df['tr'].rolling(window=period).mean()
+        tr1 = high - low
+        tr2 = abs(high - close.shift(1))
+        tr3 = abs(low - close.shift(1))
         
-        # バンドを計算
-        upper_band = hl2 + (multiplier * atr)
-        lower_band = hl2 - (multiplier * atr)
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.rolling(window=period).mean()
         
-        # スーパートレンドを計算
-        supertrend = pd.Series(index=df.index, dtype=float)
-        direction = pd.Series(index=df.index, dtype=int)
+        return atr
+    
+    def supertrend(self, df, multiplier, period):
+        """スーパートレンド計算"""
+        src = df['close'].copy()
+        atr_values = self.atr(df, period)
+        
+        upper_band = src + (multiplier * atr_values)
+        lower_band = src - (multiplier * atr_values)
+        
+        supertrend = pd.Series(np.nan, index=df.index, dtype=float)
+        direction = pd.Series(1, index=df.index, dtype=int)
+        
+        supertrend.iloc[0] = lower_band.iloc[0]
         
         for i in range(1, len(df)):
-            if pd.isna(supertrend.iloc[i-1]):
-                supertrend.iloc[i] = lower_band.iloc[i]
-                direction.iloc[i] = 1
+            if pd.isna(atr_values.iloc[i]):
+                continue
+                
+            prev_lower = lower_band.iloc[i-1]
+            prev_upper = upper_band.iloc[i-1]
+            prev_close = src.iloc[i-1]
+            curr_close = src.iloc[i]
+            prev_st = supertrend.iloc[i-1]
+            
+            # lowerBandの更新
+            if lower_band.iloc[i] > prev_lower or prev_close < prev_lower:
+                final_lower = lower_band.iloc[i]
             else:
-                if df['close'].iloc[i] > supertrend.iloc[i-1]:
+                final_lower = prev_lower
+            
+            # upperBandの更新
+            if upper_band.iloc[i] < prev_upper or prev_close > prev_upper:
+                final_upper = upper_band.iloc[i]
+            else:
+                final_upper = prev_upper
+            
+            # 方向の決定
+            if pd.isna(prev_st):
+                direction.iloc[i] = 1
+                supertrend.iloc[i] = final_lower
+            elif prev_st == prev_upper:
+                if curr_close > final_upper:
                     direction.iloc[i] = 1
-                    supertrend.iloc[i] = lower_band.iloc[i]
-                    if supertrend.iloc[i] < supertrend.iloc[i-1]:
-                        supertrend.iloc[i] = supertrend.iloc[i-1]
+                    supertrend.iloc[i] = final_lower
                 else:
                     direction.iloc[i] = -1
-                    supertrend.iloc[i] = upper_band.iloc[i]
-                    if supertrend.iloc[i] > supertrend.iloc[i-1]:
-                        supertrend.iloc[i] = supertrend.iloc[i-1]
+                    supertrend.iloc[i] = final_upper
+            else:
+                if curr_close < final_lower:
+                    direction.iloc[i] = -1
+                    supertrend.iloc[i] = final_upper
+                else:
+                    direction.iloc[i] = 1
+                    supertrend.iloc[i] = final_lower
         
-        return supertrend, direction
+        return supertrend
     
-    def calculate_rsi(self, data, period):
-        """RSIを計算"""
-        delta = data.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-        rs = gain / loss
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
+    def hma(self, data, period):
+        """Hull Moving Average"""
+        half_length = int(period / 2)
+        sqrt_length = int(np.sqrt(period))
+        
+        def wma(series, length):
+            weights = np.arange(1, length + 1)
+            def calc(x):
+                if len(x) < length:
+                    return np.nan
+                return np.sum(weights * x) / np.sum(weights)
+            return series.rolling(length).apply(calc, raw=True)
+        
+        wma1 = wma(data, half_length)
+        wma2 = wma(data, period)
+        raw_hma = 2 * wma1 - wma2
+        hma_result = wma(raw_hma, sqrt_length)
+        
+        return hma_result
     
-    def calculate_macd(self, data, fast, slow, signal):
-        """MACDを計算"""
-        ema_fast = self.calculate_ema(data, fast)
-        ema_slow = self.calculate_ema(data, slow)
+    def dchannel(self, df, length):
+        """Donchian Channel Trend"""
+        hh = df['high'].rolling(window=length).max()
+        ll = df['low'].rolling(window=length).min()
+        
+        trend = pd.Series(0, index=df.index, dtype=int)
+        
+        for i in range(length, len(df)):
+            if df['close'].iloc[i] > hh.iloc[i-1]:
+                trend.iloc[i] = 1
+            elif df['close'].iloc[i] < ll.iloc[i-1]:
+                trend.iloc[i] = -1
+            else:
+                trend.iloc[i] = trend.iloc[i-1]
+        
+        return trend
+    
+    def macd(self, data, fast, slow, signal):
+        """MACD計算"""
+        ema_fast = self.ema(data, fast)
+        ema_slow = self.ema(data, slow)
         macd_line = ema_fast - ema_slow
-        signal_line = self.calculate_ema(macd_line, signal)
-        histogram = macd_line - signal_line
-        return macd_line, signal_line, histogram
+        signal_line = self.ema(macd_line, signal)
+        return macd_line, signal_line
     
     def analyze_signals(self, df):
-        """トレードシグナルを分析"""
-        # 各種指標を計算
-        df['ema150'] = self.calculate_ema(df['close'], self.ema150_period)
-        df['ema250'] = self.calculate_ema(df['close'], self.ema250_period)
-        df['ema200'] = self.calculate_ema(df['close'], 200)
-        df['hma55'] = self.calculate_hma(df['close'], 55)
+        """シグナル分析（警告修正版）"""
+        close = df['close']
         
-        # スーパートレンドを計算
-        df['supertrend'], df['st_direction'] = self.calculate_supertrend(
-            df, self.sensitivity, self.st_tuner
+        # 各種指標の計算
+        df['ema150'] = self.ema(close, self.ema150_period)
+        df['ema250'] = self.ema(close, self.ema250_period)
+        df['hma55'] = self.hma(close, self.hma55_period)
+        
+        # スーパートレンド
+        df['supertrend'] = self.supertrend(df, self.sensitivity, self.st_tuner)
+        
+        # MACD
+        df['macd'], df['macd_signal'] = self.macd(close, self.macd_fast, 
+                                                   self.macd_slow, self.macd_signal)
+        
+        # Donchian Channel Trend
+        df['maintrend'] = self.dchannel(df, self.dchannel_period)
+        
+        # クロスオーバー検出（警告修正）
+        close_above_st = (close > df['supertrend']).astype(bool)
+        close_below_st = (close < df['supertrend']).astype(bool)
+        
+        # infer_objects() を使用してFutureWarningを回避
+        close_above_st_prev = close_above_st.shift(1)
+        close_above_st_prev = close_above_st_prev.fillna(False).infer_objects(copy=False)
+        
+        close_below_st_prev = close_below_st.shift(1)
+        close_below_st_prev = close_below_st_prev.fillna(False).infer_objects(copy=False)
+        
+        df['crossover'] = (~close_above_st_prev) & close_above_st
+        df['crossunder'] = (~close_below_st_prev) & close_below_st
+        
+        # クロスオーバー条件
+        crossover_shifted = df['crossover'].shift(1)
+        crossover_shifted = crossover_shifted.fillna(False).infer_objects(copy=False)
+        
+        crossunder_shifted = df['crossunder'].shift(1)
+        crossunder_shifted = crossunder_shifted.fillna(False).infer_objects(copy=False)
+        
+        crossover_condition = (
+            df['crossover'] | 
+            (crossover_shifted & (df['maintrend'].shift(1) < 0))
         )
         
-        # RSIを計算
-        rsi_raw = self.calculate_rsi(df['close'], self.rsi_period)
-        df['rsi_smooth'] = self.calculate_ema(rsi_raw, self.rsi_smooth)
-        
-        # MACDを計算
-        df['macd'], df['macd_signal'], df['macd_hist'] = self.calculate_macd(
-            df['close'], self.macd_fast, self.macd_slow, self.macd_signal
+        crossunder_condition = (
+            df['crossunder'] | 
+            (crossunder_shifted & (df['maintrend'].shift(1) > 0))
         )
         
-        # トレンド判定
-        df['maintrend'] = self.calculate_dchannel(df, 30)
-        
-        # ブルシグナルの条件
-        bull_condition = (
-            ((df['close'] > df['supertrend']) | 
-             ((df['close'].shift(1) > df['supertrend'].shift(1)) & 
-              (df['maintrend'].shift(1) < 0))) &
+        # 確認シグナル
+        conf_bull = (
+            crossover_condition &
             (df['macd'] > 0) &
             (df['macd'] > df['macd'].shift(1)) &
             (df['ema150'] > df['ema250']) &
@@ -146,11 +240,8 @@ class FreshAlgoTrader:
             (df['maintrend'] > 0)
         )
         
-        # ベアシグナルの条件
-        bear_condition = (
-            ((df['close'] < df['supertrend']) | 
-             ((df['close'].shift(1) < df['supertrend'].shift(1)) & 
-              (df['maintrend'].shift(1) > 0))) &
+        conf_bear = (
+            crossunder_condition &
             (df['macd'] < 0) &
             (df['macd'] < df['macd'].shift(1)) &
             (df['ema150'] < df['ema250']) &
@@ -158,75 +249,76 @@ class FreshAlgoTrader:
             (df['maintrend'] < 0)
         )
         
-        df['bull_signal'] = bull_condition
-        df['bear_signal'] = bear_condition
+        # シグナル
+        if self.presets == "All Signals":
+            df['bull_signal'] = df['crossover']
+            df['bear_signal'] = df['crossunder']
+        else:
+            conf_bull_shifted = conf_bull.shift(1)
+            conf_bull_shifted = conf_bull_shifted.fillna(False).infer_objects(copy=False)
+            
+            conf_bear_shifted = conf_bear.shift(1)
+            conf_bear_shifted = conf_bear_shifted.fillna(False).infer_objects(copy=False)
+            
+            df['bull_signal'] = conf_bull & (~conf_bull_shifted)
+            df['bear_signal'] = conf_bear & (~conf_bear_shifted)
+        
+        # NaNを False に変換
+        df['bull_signal'] = df['bull_signal'].fillna(False).infer_objects(copy=False)
+        df['bear_signal'] = df['bear_signal'].fillna(False).infer_objects(copy=False)
         
         return df
     
-    def calculate_hma(self, data, period):
-        """Hull移動平均を計算"""
-        half_length = int(period / 2)
-        sqrt_length = int(np.sqrt(period))
+    def calculate_sl_tp(self, df, entry_price, signal_type):
+        """SL/TP計算"""
+        atr_value = self.atr(df, 14).iloc[-1]
         
-        wma_half = data.rolling(window=half_length).apply(
-            lambda x: np.sum(x * np.arange(1, half_length + 1)) / np.sum(np.arange(1, half_length + 1))
-        )
-        wma_full = data.rolling(window=period).apply(
-            lambda x: np.sum(x * np.arange(1, period + 1)) / np.sum(np.arange(1, period + 1))
-        )
+        if pd.isna(atr_value) or atr_value == 0:
+            atr_value = entry_price * 0.01
         
-        raw_hma = 2 * wma_half - wma_full
-        hma = raw_hma.rolling(window=sqrt_length).apply(
-            lambda x: np.sum(x * np.arange(1, sqrt_length + 1)) / np.sum(np.arange(1, sqrt_length + 1))
-        )
-        
-        return hma
-    
-    def calculate_dchannel(self, df, length):
-        """ドンチャンチャネルトレンドを計算"""
-        highest = df['high'].rolling(window=length).max()
-        lowest = df['low'].rolling(window=length).min()
-        
-        trend = pd.Series(0, index=df.index)
-        for i in range(length, len(df)):
-            if df['close'].iloc[i] > highest.iloc[i-1]:
-                trend.iloc[i] = 1
-            elif df['close'].iloc[i] < lowest.iloc[i-1]:
-                trend.iloc[i] = -1
-            else:
-                trend.iloc[i] = trend.iloc[i-1]
-        
-        return trend
-    
-    def calculate_stop_loss_take_profit(self, entry_price, signal_type, atr):
-        """ストップロスとテイクプロフィットを計算"""
         if signal_type == "BUY":
-            sl = entry_price - (atr * 2.2)
-            tp1 = entry_price + (entry_price - sl) * self.mult_tp1
-            tp2 = entry_price + (entry_price - sl) * self.mult_tp2
-            tp3 = entry_price + (entry_price - sl) * self.mult_tp3
-        else:  # SELL
-            sl = entry_price + (atr * 2.2)
-            tp1 = entry_price - (sl - entry_price) * self.mult_tp1
-            tp2 = entry_price - (sl - entry_price) * self.mult_tp2
-            tp3 = entry_price - (sl - entry_price) * self.mult_tp3
+            sl = entry_price - (atr_value * self.atr_multiplier)
+            risk = entry_price - sl
+            tp1 = entry_price + (risk * self.mult_tp1)
+            tp2 = entry_price + (risk * self.mult_tp2)
+            tp3 = entry_price + (risk * self.mult_tp3)
+        else:
+            sl = entry_price + (atr_value * self.atr_multiplier)
+            risk = sl - entry_price
+            tp1 = entry_price - (risk * self.mult_tp1)
+            tp2 = entry_price - (risk * self.mult_tp2)
+            tp3 = entry_price - (risk * self.mult_tp3)
         
         return sl, tp1, tp2, tp3
     
     def send_order(self, signal_type, sl, tp):
-        """注文を送信"""
+        """注文送信"""
+        current_time = time.time()
+        if current_time - self.last_trade_time < self.min_interval:
+            print(f"取引間隔制限: {self.min_interval}秒待機")
+            return False
+        
         symbol_info = mt5.symbol_info(self.symbol)
         if symbol_info is None:
             print(f"{self.symbol}が見つかりません")
             return False
-        
+            
         if not symbol_info.visible:
             if not mt5.symbol_select(self.symbol, True):
                 print(f"{self.symbol}を選択できません")
                 return False
         
-        point = symbol_info.point
-        price = mt5.symbol_info_tick(self.symbol).ask if signal_type == "BUY" else mt5.symbol_info_tick(self.symbol).bid
+        tick = mt5.symbol_info_tick(self.symbol)
+        if tick is None:
+            print("価格取得失敗")
+            return False
+            
+        price = tick.ask if signal_type == "BUY" else tick.bid
+        
+        # 価格の正規化
+        digits = symbol_info.digits
+        sl = round(sl, digits)
+        tp = round(tp, digits)
         
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
@@ -244,16 +336,18 @@ class FreshAlgoTrader:
         }
         
         result = mt5.order_send(request)
-        if result.retcode != mt5.TRADE_RETCODE_DONE:
-            print(f"注文失敗: {result.retcode}")
-            return False
         
-        print(f"注文成功: {signal_type} @ {price}, SL: {sl}, TP: {tp}")
-        return True
+        if result.retcode == mt5.TRADE_RETCODE_DONE:
+            self.last_trade_time = current_time
+            print(f"[OK] {signal_type} @ {price}, SL: {sl}, TP: {tp}")
+            return True
+        else:
+            print(f"[NG] 注文失敗: {result.comment} (code: {result.retcode})")
+            return False
     
-    def check_open_positions(self):
-        """オープンポジションをチェック"""
-        positions = mt5.positions_get(symbol=self.symbol)
+    def check_positions(self):
+        """ポジション確認"""
+        positions = mt5.positions_get(symbol=self.symbol, magic=self.magic_number)
         return len(positions) if positions else 0
     
     def run(self):
@@ -261,59 +355,61 @@ class FreshAlgoTrader:
         if not self.initialize_mt5():
             return
         
-        print(f"自動売買開始: {self.symbol}")
-        print("デモアカウントで十分にテストしてください！")
+        print("="*60)
+        print("Fresh Algo V24 - PineScript完全再現版")
+        print(f"通貨ペア: {self.symbol}")
+        print(f"時間軸: {self.timeframe}")
+        print(f"プリセット: {self.presets}")
+        print("="*60)
         
         try:
             while True:
-                # オープンポジションをチェック
-                if self.check_open_positions() > 0:
-                    print("既存のポジションがあります。新規エントリーをスキップ")
-                    time.sleep(60)
+                if self.check_positions() > 0:
+                    time.sleep(30)
                     continue
                 
-                # データを取得して分析
                 df = self.get_rates(500)
-                if df is None:
-                    time.sleep(60)
+                if df is None or len(df) < 300:
+                    print("データ取得失敗")
+                    time.sleep(30)
                     continue
                 
-                df = self.analyze_signals(df)
+                try:
+                    df = self.analyze_signals(df)
+                except Exception as e:
+                    print(f"分析エラー: {e}")
+                    time.sleep(30)
+                    continue
                 
-                # 最新のシグナルをチェック
-                if df['bull_signal'].iloc[-1]:
-                    print("★ ブルシグナル検出")
-                    atr = df['tr'].iloc[-20:].mean()
-                    entry_price = df['close'].iloc[-1]
-                    sl, tp1, tp2, tp3 = self.calculate_stop_loss_take_profit(
-                        entry_price, "BUY", atr
-                    )
-                    self.send_order("BUY", sl, tp1)
+                # シグナルチェック
+                if len(df) >= 2:
+                    if df['bull_signal'].iloc[-1] and not df['bull_signal'].iloc[-2]:
+                        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] BUY シグナル検出")
+                        entry = df['close'].iloc[-1]
+                        sl, tp1, tp2, tp3 = self.calculate_sl_tp(df, entry, "BUY")
+                        self.send_order("BUY", sl, tp1)
+                    
+                    elif df['bear_signal'].iloc[-1] and not df['bear_signal'].iloc[-2]:
+                        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] SELL シグナル検出")
+                        entry = df['close'].iloc[-1]
+                        sl, tp1, tp2, tp3 = self.calculate_sl_tp(df, entry, "SELL")
+                        self.send_order("SELL", sl, tp1)
                 
-                elif df['bear_signal'].iloc[-1]:
-                    print("★ ベアシグナル検出")
-                    atr = df['tr'].iloc[-20:].mean()
-                    entry_price = df['close'].iloc[-1]
-                    sl, tp1, tp2, tp3 = self.calculate_stop_loss_take_profit(
-                        entry_price, "SELL", atr
-                    )
-                    self.send_order("SELL", sl, tp1)
-                
-                # 1分待機
-                time.sleep(60)
+                time.sleep(30)
                 
         except KeyboardInterrupt:
-            print("\n自動売買を停止しました")
+            print("\n停止しました")
+        except Exception as e:
+            print(f"\nエラー: {e}")
         finally:
             mt5.shutdown()
 
 # 使用例
 if __name__ == "__main__":
-    # 設定
-    SYMBOL = "USDJPY"  # 通貨ペア
-    TIMEFRAME = mt5.TIMEFRAME_M15  # 15分足
-    LOT_SIZE = 0.01  # ロットサイズ（デモで小さく）
+    trader = FreshAlgoTrader_Exact(
+        symbol="BTCUSD",
+        timeframe=mt5.TIMEFRAME_M1,
+        lot_size=0.01
+    )
     
-    # トレーダーを初期化して実行
-    trader = FreshAlgoTrader(SYMBOL, TIMEFRAME, LOT_SIZE)
     trader.run()
