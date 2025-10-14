@@ -24,3 +24,14 @@ DEF_MAX_RISK = 50.0 # % 耐えられるのか?その手取りで
 DEF_USE_TREND = True
 DEF_USE_DYNAMIC = True
 DEVIATION = 100 # points
+MAGIC_NUMBER = 1234 # unique identifier for this bot's order
+GRID_TAG = "enhanced grid" # order tag
+CHECK_INTERVAL = 1.0 # sec
+
+# 
+def _discover_terminals() -> list[str]:
+    path = []
+    if psutil:
+        for p in psutil.process_iter(attr=["name", "exe"]):
+            if "terminal64.exe" in (p.info.get("name") or "").lower(): # name = p.name()だと遅いしps止まったりするとエラーになる。info.get()だとpsutilが内部的にinfo_dict = p.name()みたいな処理して
+                　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　# except節でinfo_dict["name"] = None　みたいにエラーも処理してくれてる
