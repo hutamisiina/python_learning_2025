@@ -30,8 +30,11 @@ CHECK_INTERVAL = 1.0 # sec
 
 # 
 def _discover_terminals() -> list[str]:
-    path = []
+    paths = []
     if psutil:
         for p in psutil.process_iter(attr=["name", "exe"]):
             if "terminal64.exe" in (p.info.get("name") or "").lower(): # name = p.name()だと遅いしps止まったりするとエラーになる。info.get()だとpsutilが内部的にinfo_dict = p.name()みたいな処理して
-                　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　　# except節でinfo_dict["name"] = None　みたいにエラーも処理してくれてる
+               exe = p.info.get("exe") or "" # except節でinfo_dict["name"] = None　みたいにエラーも処理してくれてる
+               if exe and exe not in paths:
+                   path.append(exe)
+    return paths
