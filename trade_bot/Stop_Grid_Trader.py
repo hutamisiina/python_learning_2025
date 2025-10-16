@@ -36,5 +36,10 @@ def _discover_terminals() -> list[str]:
             if "terminal64.exe" in (p.info.get("name") or "").lower(): # name = p.name()だと遅いしps止まったりするとエラーになる。info.get()だとpsutilが内部的にinfo_dict = p.name()みたいな処理して
                exe = p.info.get("exe") or "" # except節でinfo_dict["name"] = None　みたいにエラーも処理してくれてる
                if exe and exe not in paths:
-                   path.append(exe)
+                   paths.append(exe)
     return paths
+
+def choose_terminal() -> str | None:
+    root = tk.Tk(); root.withdraw() 
+
+win  = tk.Toplevel(root); win.title("Choose MT5 Terminal"); win.grab_set() # モーダルにする
