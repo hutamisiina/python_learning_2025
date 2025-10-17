@@ -41,5 +41,6 @@ def _discover_terminals() -> list[str]:
 
 def choose_terminal() -> str | None:
     root = tk.Tk(); root.withdraw() 
-
-win  = tk.Toplevel(root); win.title("Choose MT5 Terminal"); win.grab_set() # モーダルにする
+    win  = tk.Toplevel(root); win.title("Choose MT5 Terminal"); win.grab_set() # モーダルにする
+    cols = ("exe", "login" "server", "balance", "currency", "name")
+    tree = ttk.Treeview(win, columns=cols, show="headings", height=8)
