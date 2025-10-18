@@ -44,3 +44,5 @@ def choose_terminal() -> str | None:
     win  = tk.Toplevel(root); win.title("Choose MT5 Terminal"); win.grab_set() # モーダルにする
     cols = ("exe", "login" "server", "balance", "currency", "name")
     tree = ttk.Treeview(win, columns=cols, show="headings", height=8)
+    for c, w in zip(cols, (300, 100, 150, 100, 200)):
+        tree.heading(c, text=c.title()); tree.column(c, width=w, anchor="w")
